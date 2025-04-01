@@ -43,6 +43,22 @@ export interface ExecuteTxArgs {
   'psbt_hex' : string,
 }
 export interface FinalizeTxArgs { 'txid' : string, 'pool_key' : string }
+export interface GameAndGamer {
+  'game_duration' : bigint,
+  'claimed_cookies' : bigint,
+  'cookie_amount_per_claim' : bigint,
+  'max_cookies' : bigint,
+  'gamer' : [] | [Gamer],
+  'game_start_time' : bigint,
+  'claim_cooling_down' : bigint,
+  'gamer_register_fee' : bigint,
+}
+export interface Gamer {
+  'is_withdrawn' : boolean,
+  'last_click_time' : bigint,
+  'address' : string,
+  'cookies' : bigint,
+}
 export interface GetMinimalTxValueArgs {
   'zero_confirmed_tx_queue_length' : number,
   'pool_address' : string,
@@ -77,6 +93,14 @@ export interface PoolInfo {
   'nonce' : bigint,
   'utxos' : Array<Utxo>,
 }
+export interface PoolState {
+  'id' : [] | [string],
+  'utxo' : Utxo,
+  'rune_utxo' : Utxo,
+  'rune_balance' : bigint,
+  'user_action' : UserAction,
+  'nonce' : bigint,
+}
 export interface RegisterInfo {
   'tweaked_key' : string,
   'utxo' : Utxo,
@@ -102,6 +126,9 @@ export type Result_3 = { 'Ok' : null } |
   { 'Err' : string };
 export type Result_4 = { 'Ok' : string } |
   { 'Err' : ExchangeError };
+export type UserAction = { 'Withdraw' : string } |
+  { 'Init' : null } |
+  { 'Register' : string };
 export interface Utxo {
   'maybe_rune' : [] | [CoinBalance],
   'sats' : bigint,
@@ -113,12 +140,14 @@ export interface _SERVICE {
   'deposit' : ActorMethod<[Utxo, Utxo], Result_1>,
   'execute_tx' : ActorMethod<[ExecuteTxArgs], Result_2>,
   'finalize_tx' : ActorMethod<[FinalizeTxArgs], Result_3>,
+  'get_game_and_gamer_infos' : ActorMethod<[string], GameAndGamer>,
   'get_minimal_tx_value' : ActorMethod<[GetMinimalTxValueArgs], bigint>,
   'get_pool_info' : ActorMethod<[GetPoolInfoArgs], [] | [PoolInfo]>,
   'get_pool_list' : ActorMethod<[GetPoolListArgs], Array<PoolInfo>>,
+  'get_pool_states' : ActorMethod<[], Array<PoolState>>,
+  'get_register_info' : ActorMethod<[], RegisterInfo>,
+  'get_rune_deposit_address' : ActorMethod<[], [] | [string]>,
   'init_key' : ActorMethod<[], Result_4>,
-  'query_register_info' : ActorMethod<[], RegisterInfo>,
-  'query_rune_deposit_address' : ActorMethod<[], [] | [string]>,
   'rollback_tx' : ActorMethod<[FinalizeTxArgs], Result_3>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;

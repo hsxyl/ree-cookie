@@ -81,6 +81,22 @@ export const idlFactory = ({ IDL }) => {
     'pool_key' : IDL.Text,
   });
   const Result_3 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const Gamer = IDL.Record({
+    'is_withdrawn' : IDL.Bool,
+    'last_click_time' : IDL.Nat64,
+    'address' : IDL.Text,
+    'cookies' : IDL.Nat,
+  });
+  const GameAndGamer = IDL.Record({
+    'game_duration' : IDL.Nat64,
+    'claimed_cookies' : IDL.Nat,
+    'cookie_amount_per_claim' : IDL.Nat,
+    'max_cookies' : IDL.Nat,
+    'gamer' : IDL.Opt(Gamer),
+    'game_start_time' : IDL.Nat64,
+    'claim_cooling_down' : IDL.Nat64,
+    'gamer_register_fee' : IDL.Nat64,
+  });
   const GetMinimalTxValueArgs = IDL.Record({
     'zero_confirmed_tx_queue_length' : IDL.Nat32,
     'pool_address' : IDL.Text,
@@ -101,7 +117,19 @@ export const idlFactory = ({ IDL }) => {
     'from' : IDL.Opt(IDL.Text),
     'limit' : IDL.Nat32,
   });
-  const Result_4 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ExchangeError });
+  const UserAction = IDL.Variant({
+    'Withdraw' : IDL.Text,
+    'Init' : IDL.Null,
+    'Register' : IDL.Text,
+  });
+  const PoolState = IDL.Record({
+    'id' : IDL.Opt(IDL.Text),
+    'utxo' : Utxo,
+    'rune_utxo' : Utxo,
+    'rune_balance' : IDL.Nat,
+    'user_action' : UserAction,
+    'nonce' : IDL.Nat64,
+  });
   const RegisterInfo = IDL.Record({
     'tweaked_key' : IDL.Text,
     'utxo' : Utxo,
@@ -110,25 +138,36 @@ export const idlFactory = ({ IDL }) => {
     'nonce' : IDL.Nat64,
     'register_fee' : IDL.Nat64,
   });
+  const Result_4 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ExchangeError });
   return IDL.Service({
     'claim' : IDL.Func([], [Result], []),
     'deposit' : IDL.Func([Utxo, Utxo], [Result_1], []),
     'execute_tx' : IDL.Func([ExecuteTxArgs], [Result_2], []),
     'finalize_tx' : IDL.Func([FinalizeTxArgs], [Result_3], []),
+    'get_game_and_gamer_infos' : IDL.Func(
+        [IDL.Text],
+        [GameAndGamer],
+        ['query'],
+      ),
     'get_minimal_tx_value' : IDL.Func(
         [GetMinimalTxValueArgs],
         [IDL.Nat64],
         ['query'],
       ),
-    'get_pool_info' : IDL.Func([GetPoolInfoArgs], [IDL.Opt(PoolInfo)], []),
+    'get_pool_info' : IDL.Func(
+        [GetPoolInfoArgs],
+        [IDL.Opt(PoolInfo)],
+        ['query'],
+      ),
     'get_pool_list' : IDL.Func(
         [GetPoolListArgs],
         [IDL.Vec(PoolInfo)],
         ['query'],
       ),
+    'get_pool_states' : IDL.Func([], [IDL.Vec(PoolState)], ['query']),
+    'get_register_info' : IDL.Func([], [RegisterInfo], ['query']),
+    'get_rune_deposit_address' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
     'init_key' : IDL.Func([], [Result_4], []),
-    'query_register_info' : IDL.Func([], [RegisterInfo], ['query']),
-    'query_rune_deposit_address' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
     'rollback_tx' : IDL.Func([FinalizeTxArgs], [Result_3], []),
   });
 };

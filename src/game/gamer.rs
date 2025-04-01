@@ -8,7 +8,7 @@ use crate::*;
 use crate::SecondTimestamp;
 
 
-#[derive(CandidType, Serialize, Deserialize, Clone)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct Gamer {
     pub address: String,
     pub cookies: u128,

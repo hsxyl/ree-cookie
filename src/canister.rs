@@ -2,7 +2,7 @@
 use std::str::FromStr;
 
 use crate::{
-    external::{internal_identity::get_principal, management::request_schnorr_key}, memory::{mutate_state, read_state, set_state}, state::{ExchangeState, PoolState}, utils::{tweak_pubkey_with_empty, RegisterInfo}, ExchangeError, Seconds, MIN_BTC_VALUE
+    external::{internal_identity::get_principal, management::request_schnorr_key}, game::{game::{Game, GameAndGamer}, gamer::Gamer}, memory::{mutate_state, read_state, set_state}, state::{ExchangeState, PoolState}, utils::{tweak_pubkey_with_empty, RegisterInfo}, ExchangeError, Seconds, MIN_BTC_VALUE
 };
 use candid::Principal;
 use ic_cdk::{api::management_canister::bitcoin::Satoshi, init, post_upgrade, query, update};
@@ -71,12 +71,12 @@ pub async fn init_key() -> Result<String, ExchangeError> {
 }
 
 #[query]
-fn query_rune_deposit_address() -> Option<String> {
+fn get_rune_deposit_address() -> Option<String> {
     read_state(|s| s.address.clone())
 }
 
 #[query]
-fn query_register_info() -> RegisterInfo {
+fn get_register_info() -> RegisterInfo {
     let (key, address, register_fee, last_state_res) = read_state(|s| (s.key.clone(), s.address.clone(), s.game.gamer_register_fee,s.last_state()));
     let last_state = last_state_res.unwrap();
     let tweaked_key = tweak_pubkey_with_empty(key.clone().unwrap());
@@ -151,7 +151,14 @@ fn get_minimal_tx_value(_args: GetMinimalTxValueArgs) -> GetMinimalTxValueRespon
     MIN_BTC_VALUE
 }
 
-#[update]
+#[query]
+pub fn get_pool_states()->Vec<PoolState> {
+    read_state(|s| {
+        s.states.clone()
+    })
+}
+
+#[query]
 pub fn get_pool_info(args: GetPoolInfoArgs) -> GetPoolInfoResponse {
     let pool_address = args.pool_address;
 
@@ -176,6 +183,23 @@ pub fn get_pool_info(args: GetPoolInfoArgs) -> GetPoolInfoResponse {
             return None;
         }
     })
+}
+
+#[query]
+pub fn get_game_and_gamer_infos(gamer_id: crate::Address) -> GameAndGamer {
+
+    read_state(|s| {
+        GameAndGamer { 
+            game_duration: s.game.game_duration, 
+            game_start_time: s.game.game_start_time, 
+            gamer_register_fee: s.game.gamer_register_fee, 
+            claim_cooling_down: s.game.claim_cooling_down, 
+            cookie_amount_per_claim: s.game.cookie_amount_per_claim, 
+            max_cookies: s.game.max_cookies, 
+            claimed_cookies: s.game.claimed_cookies, 
+            gamer: s.game.gamer.get(&gamer_id) 
+        }
+    }) 
 }
 
 #[query]
@@ -330,6 +354,12 @@ fn ensure_orchestrator() -> std::result::Result<(), String> {
 
 #[post_upgrade]
 fn post_upgrade() {
+
+    // mutate_state(|s| {
+    //     s.game.game_start_time = 1742412833;
+    //     s.game.game_duration = 60 * 60 * 24 * 50;
+    //     s.game.claim_cooling_down = 60 * 60 * 1;
+    // });
    
     log!(
         INFO,

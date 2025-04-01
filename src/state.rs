@@ -275,7 +275,7 @@ impl ExchangeState {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, CandidType)]
 pub struct PoolState {
     pub id: Option<Txid>,
     pub nonce: u64,
@@ -291,7 +291,7 @@ impl PoolState {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, CandidType)]
 pub enum UserAction {
     Init,
     Register(Address),

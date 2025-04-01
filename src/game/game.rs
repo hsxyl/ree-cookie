@@ -129,3 +129,15 @@ impl Game {
         }
     }
 }
+
+#[derive(CandidType, Deserialize, Serialize, Debug, Clone)]
+pub struct GameAndGamer {
+    pub game_duration: Seconds,
+    pub game_start_time: SecondTimestamp,
+    pub gamer_register_fee: Satoshi,
+    pub claim_cooling_down: Seconds,
+    pub cookie_amount_per_claim: u128,
+    pub max_cookies: u128,
+    pub claimed_cookies: u128,
+    pub gamer: Option<Gamer>,
+}
