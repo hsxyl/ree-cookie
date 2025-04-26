@@ -1,3 +1,7 @@
+type AddLiquidityInfo = record {
+  btc_amount_for_add_liquidity : nat64;
+  rune_amount_for_add_liquidity : nat;
+};
 type CoinBalance = record { id : text; value : nat };
 type ExchangeError = variant {
   InvalidSignPsbtArgs : text;
@@ -8,11 +12,15 @@ type ExchangeError = variant {
   PoolAddressNotFound;
   NatConvertError : nat;
   CookieBalanceInsufficient : nat;
+  GameEnd;
+  ReorgError : ReorgError;
   GamerAlreadyExist : text;
+  DuplicateBlock : record { nat32; text };
   PoolStateExpired : nat64;
   GamerNotFound : text;
   GameNotEnd;
   TooSmallFunds;
+  Unrecoverable;
   LastStateNotFound;
   InvalidRuneId;
   InvalidPool;
@@ -29,9 +37,24 @@ type ExchangeError = variant {
   FetchRuneIndexerError : record { RejectionCode; text };
   CustomError : text;
   InvalidState : text;
+  Recoverable : record { nat32; nat32 };
   InsufficientFunds;
   GamerWithdrawRepeatedly : text;
   RuneIdNotMatch : record { text; text };
+};
+type ExchangeState = record {
+  key : opt text;
+  states : vec PoolState;
+  game : Game;
+  richswap_pool_address : text;
+  rune_name : text;
+  etching_key : opt text;
+  orchestrator : principal;
+  game_status : GameStatus;
+  btc_customs_principle : principal;
+  address : opt text;
+  ii_canister : principal;
+  rune_id : opt text;
 };
 type ExecuteTxArgs = record {
   zero_confirmed_tx_queue_length : nat32;
@@ -40,16 +63,30 @@ type ExecuteTxArgs = record {
   intention_index : nat32;
   psbt_hex : text;
 };
-type FinalizeTxArgs = record { txid : text; pool_key : text };
-type GameAndGamer = record {
-  game_duration : nat64;
+type Game = record {
   claimed_cookies : nat;
   cookie_amount_per_claim : nat;
-  max_cookies : nat;
-  gamer : opt Gamer;
-  game_start_time : nat64;
+  is_end : bool;
+  start_time : nat64;
+  already_add_liquidity : bool;
   claim_cooling_down : nat64;
   gamer_register_fee : nat64;
+};
+type GameAndGamer = record {
+  claimed_cookies : nat;
+  cookie_amount_per_claim : nat;
+  is_end : bool;
+  gamer : opt Gamer;
+  claim_cooling_down : nat64;
+  gamer_register_fee : nat64;
+};
+type GameStatus = variant {
+  Ended;
+  Play;
+  Withdrawable;
+  RunesMinted;
+  Initialize : record { init_btc : bool; init_key : bool };
+  LiquidityAdded;
 };
 type Gamer = record {
   is_withdrawn : bool;
@@ -62,7 +99,6 @@ type GetMinimalTxValueArgs = record {
   pool_address : text;
 };
 type GetPoolInfoArgs = record { pool_address : text };
-type GetPoolListArgs = record { from : opt text; limit : nat32 };
 type InputCoin = record { coin : CoinBalance; from : text };
 type Intention = record {
   input_coins : vec InputCoin;
@@ -76,10 +112,18 @@ type Intention = record {
   pool_address : text;
 };
 type IntentionSet = record {
+  tx_fee_in_sats : nat64;
   initiator_address : text;
   intentions : vec Intention;
 };
+type NewBlockInfo = record {
+  block_hash : text;
+  confirmed_txids : vec text;
+  block_timestamp : nat64;
+  block_height : nat32;
+};
 type OutputCoin = record { to : text; coin : CoinBalance };
+type PoolBasic = record { name : text; address : text };
 type PoolInfo = record {
   key : text;
   name : text;
@@ -94,7 +138,7 @@ type PoolInfo = record {
 type PoolState = record {
   id : opt text;
   utxo : Utxo;
-  rune_utxo : Utxo;
+  rune_utxo : opt Utxo;
   rune_balance : nat;
   user_action : UserAction;
   nonce : nat64;
@@ -116,11 +160,18 @@ type RejectionCode = variant {
   SysFatal;
   CanisterReject;
 };
+type ReorgError = variant {
+  DuplicateBlock : record { height : nat32; hash : text };
+  BlockNotFoundInState : record { height : nat32 };
+  Unrecoverable;
+  Recoverable : record { height : nat32; depth : nat32 };
+};
 type Result = variant { Ok : nat; Err : ExchangeError };
-type Result_1 = variant { Ok; Err : ExchangeError };
-type Result_2 = variant { Ok : text; Err : text };
-type Result_3 = variant { Ok; Err : text };
-type Result_4 = variant { Ok : text; Err : ExchangeError };
+type Result_1 = variant { Ok : text; Err : text };
+type Result_2 = variant { Ok; Err : ExchangeError };
+type Result_3 = variant { Ok : text; Err : ExchangeError };
+type Result_4 = variant { Ok; Err : text };
+type RollbackTxArgs = record { txid : text };
 type UserAction = variant { Withdraw : text; Init; Register : text };
 type Utxo = record {
   maybe_rune : opt CoinBalance;
@@ -128,29 +179,25 @@ type Utxo = record {
   txid : text;
   vout : nat32;
 };
-service : (
-  nat64,
-  nat32,
-  text,
-  nat64,
-  nat64,
-  nat64,
-  nat,
-  nat,
-  principal,
-  principal,
-) -> {
+service : (text, nat64, nat64, nat, principal, principal, principal, text) -> {
   claim : () -> (Result);
-  deposit : (Utxo, Utxo) -> (Result_1);
-  execute_tx : (ExecuteTxArgs) -> (Result_2);
-  finalize_tx : (FinalizeTxArgs) -> (Result_3);
+  end_game : () -> ();
+  etch_rune : () -> (Result_1);
+  execute_tx : (ExecuteTxArgs) -> (Result_1);
+  get_chain_key_btc_address : () -> (opt text) query;
+  get_exchange_state : () -> (ExchangeState) query;
   get_game_and_gamer_infos : (text) -> (GameAndGamer) query;
   get_minimal_tx_value : (GetMinimalTxValueArgs) -> (nat64) query;
   get_pool_info : (GetPoolInfoArgs) -> (opt PoolInfo) query;
-  get_pool_list : (GetPoolListArgs) -> (vec PoolInfo) query;
+  get_pool_list : () -> (vec PoolBasic) query;
   get_pool_states : () -> (vec PoolState) query;
   get_register_info : () -> (RegisterInfo) query;
-  get_rune_deposit_address : () -> (opt text) query;
-  init_key : () -> (Result_4);
-  rollback_tx : (FinalizeTxArgs) -> (Result_3);
+  init_btc_utxo : (Utxo) -> (Result_2);
+  init_key : () -> (Result_3);
+  new_block : (NewBlockInfo) -> (Result_4);
+  query_add_liquidity_info : () -> (AddLiquidityInfo) query;
+  query_principle_by_ii : (text) -> (text);
+  reset_blocks : () -> ();
+  rollback_tx : (RollbackTxArgs) -> (Result_4);
+  update_rune_info : (Utxo) -> ();
 }

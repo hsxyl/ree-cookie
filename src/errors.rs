@@ -61,6 +61,8 @@ pub enum ExchangeError {
     CookieBalanceInsufficient(u128),
     #[error("Game Not End")]
     GameNotEnd,
+    #[error("Game End")]
+    GameEnd,
     #[error("Gamer Not Found, {0}")]
     GamerNotFound(Address),
     #[error("Gamer Withdraw Repeatedly, {0}")]
@@ -69,6 +71,15 @@ pub enum ExchangeError {
     GamerAlreadyExist(Address),
     #[error("Gamer Cooling Down, {0} next claimable timestamp {1}")]
     GamerCoolingDown(Address, SecondTimestamp),
+    #[error("Unrecoverable error")]
+    Unrecoverable,
+    #[error("Duplicate block, height: {0}, hash: {1}")]
+    DuplicateBlock(u32, String),
+    #[error("Invalid block, height: {0}, depth: {1}")]
+    Recoverable(u32, u32),
+
+    #[error("Reorg error: {0}")]
+    ReorgError(#[from] reorg::ReorgError),
 
     #[error("{0}")]
     CustomError(String),

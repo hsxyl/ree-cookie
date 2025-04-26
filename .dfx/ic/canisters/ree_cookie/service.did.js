@@ -1,4 +1,10 @@
 export const idlFactory = ({ IDL }) => {
+  const ReorgError = IDL.Variant({
+    'DuplicateBlock' : IDL.Record({ 'height' : IDL.Nat32, 'hash' : IDL.Text }),
+    'BlockNotFoundInState' : IDL.Record({ 'height' : IDL.Nat32 }),
+    'Unrecoverable' : IDL.Null,
+    'Recoverable' : IDL.Record({ 'height' : IDL.Nat32, 'depth' : IDL.Nat32 }),
+  });
   const RejectionCode = IDL.Variant({
     'NoError' : IDL.Null,
     'CanisterError' : IDL.Null,
@@ -17,11 +23,15 @@ export const idlFactory = ({ IDL }) => {
     'PoolAddressNotFound' : IDL.Null,
     'NatConvertError' : IDL.Nat,
     'CookieBalanceInsufficient' : IDL.Nat,
+    'GameEnd' : IDL.Null,
+    'ReorgError' : ReorgError,
     'GamerAlreadyExist' : IDL.Text,
+    'DuplicateBlock' : IDL.Tuple(IDL.Nat32, IDL.Text),
     'PoolStateExpired' : IDL.Nat64,
     'GamerNotFound' : IDL.Text,
     'GameNotEnd' : IDL.Null,
     'TooSmallFunds' : IDL.Null,
+    'Unrecoverable' : IDL.Null,
     'LastStateNotFound' : IDL.Null,
     'InvalidRuneId' : IDL.Null,
     'InvalidPool' : IDL.Null,
@@ -38,19 +48,14 @@ export const idlFactory = ({ IDL }) => {
     'FetchRuneIndexerError' : IDL.Tuple(RejectionCode, IDL.Text),
     'CustomError' : IDL.Text,
     'InvalidState' : IDL.Text,
+    'Recoverable' : IDL.Tuple(IDL.Nat32, IDL.Nat32),
     'InsufficientFunds' : IDL.Null,
     'GamerWithdrawRepeatedly' : IDL.Text,
     'RuneIdNotMatch' : IDL.Tuple(IDL.Text, IDL.Text),
   });
   const Result = IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ExchangeError });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text });
   const CoinBalance = IDL.Record({ 'id' : IDL.Text, 'value' : IDL.Nat });
-  const Utxo = IDL.Record({
-    'maybe_rune' : IDL.Opt(CoinBalance),
-    'sats' : IDL.Nat64,
-    'txid' : IDL.Text,
-    'vout' : IDL.Nat32,
-  });
-  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ExchangeError });
   const InputCoin = IDL.Record({ 'coin' : CoinBalance, 'from' : IDL.Text });
   const OutputCoin = IDL.Record({ 'to' : IDL.Text, 'coin' : CoinBalance });
   const Intention = IDL.Record({
@@ -65,6 +70,7 @@ export const idlFactory = ({ IDL }) => {
     'pool_address' : IDL.Text,
   });
   const IntentionSet = IDL.Record({
+    'tx_fee_in_sats' : IDL.Nat64,
     'initiator_address' : IDL.Text,
     'intentions' : IDL.Vec(Intention),
   });
@@ -75,12 +81,56 @@ export const idlFactory = ({ IDL }) => {
     'intention_index' : IDL.Nat32,
     'psbt_hex' : IDL.Text,
   });
-  const Result_2 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : IDL.Text });
-  const FinalizeTxArgs = IDL.Record({
+  const Utxo = IDL.Record({
+    'maybe_rune' : IDL.Opt(CoinBalance),
+    'sats' : IDL.Nat64,
     'txid' : IDL.Text,
-    'pool_key' : IDL.Text,
+    'vout' : IDL.Nat32,
   });
-  const Result_3 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const UserAction = IDL.Variant({
+    'Withdraw' : IDL.Text,
+    'Init' : IDL.Null,
+    'Register' : IDL.Text,
+  });
+  const PoolState = IDL.Record({
+    'id' : IDL.Opt(IDL.Text),
+    'utxo' : Utxo,
+    'rune_utxo' : IDL.Opt(Utxo),
+    'rune_balance' : IDL.Nat,
+    'user_action' : UserAction,
+    'nonce' : IDL.Nat64,
+  });
+  const Game = IDL.Record({
+    'claimed_cookies' : IDL.Nat,
+    'cookie_amount_per_claim' : IDL.Nat,
+    'is_end' : IDL.Bool,
+    'start_time' : IDL.Nat64,
+    'already_add_liquidity' : IDL.Bool,
+    'claim_cooling_down' : IDL.Nat64,
+    'gamer_register_fee' : IDL.Nat64,
+  });
+  const GameStatus = IDL.Variant({
+    'Ended' : IDL.Null,
+    'Play' : IDL.Null,
+    'Withdrawable' : IDL.Null,
+    'RunesMinted' : IDL.Null,
+    'Initialize' : IDL.Record({ 'init_btc' : IDL.Bool, 'init_key' : IDL.Bool }),
+    'LiquidityAdded' : IDL.Null,
+  });
+  const ExchangeState = IDL.Record({
+    'key' : IDL.Opt(IDL.Text),
+    'states' : IDL.Vec(PoolState),
+    'game' : Game,
+    'richswap_pool_address' : IDL.Text,
+    'rune_name' : IDL.Text,
+    'etching_key' : IDL.Opt(IDL.Text),
+    'orchestrator' : IDL.Principal,
+    'game_status' : GameStatus,
+    'btc_customs_principle' : IDL.Principal,
+    'address' : IDL.Opt(IDL.Text),
+    'ii_canister' : IDL.Principal,
+    'rune_id' : IDL.Opt(IDL.Text),
+  });
   const Gamer = IDL.Record({
     'is_withdrawn' : IDL.Bool,
     'last_click_time' : IDL.Nat64,
@@ -88,12 +138,10 @@ export const idlFactory = ({ IDL }) => {
     'cookies' : IDL.Nat,
   });
   const GameAndGamer = IDL.Record({
-    'game_duration' : IDL.Nat64,
     'claimed_cookies' : IDL.Nat,
     'cookie_amount_per_claim' : IDL.Nat,
-    'max_cookies' : IDL.Nat,
+    'is_end' : IDL.Bool,
     'gamer' : IDL.Opt(Gamer),
-    'game_start_time' : IDL.Nat64,
     'claim_cooling_down' : IDL.Nat64,
     'gamer_register_fee' : IDL.Nat64,
   });
@@ -113,23 +161,7 @@ export const idlFactory = ({ IDL }) => {
     'nonce' : IDL.Nat64,
     'utxos' : IDL.Vec(Utxo),
   });
-  const GetPoolListArgs = IDL.Record({
-    'from' : IDL.Opt(IDL.Text),
-    'limit' : IDL.Nat32,
-  });
-  const UserAction = IDL.Variant({
-    'Withdraw' : IDL.Text,
-    'Init' : IDL.Null,
-    'Register' : IDL.Text,
-  });
-  const PoolState = IDL.Record({
-    'id' : IDL.Opt(IDL.Text),
-    'utxo' : Utxo,
-    'rune_utxo' : Utxo,
-    'rune_balance' : IDL.Nat,
-    'user_action' : UserAction,
-    'nonce' : IDL.Nat64,
-  });
+  const PoolBasic = IDL.Record({ 'name' : IDL.Text, 'address' : IDL.Text });
   const RegisterInfo = IDL.Record({
     'tweaked_key' : IDL.Text,
     'utxo' : Utxo,
@@ -138,12 +170,27 @@ export const idlFactory = ({ IDL }) => {
     'nonce' : IDL.Nat64,
     'register_fee' : IDL.Nat64,
   });
-  const Result_4 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ExchangeError });
+  const Result_2 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ExchangeError });
+  const Result_3 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ExchangeError });
+  const NewBlockInfo = IDL.Record({
+    'block_hash' : IDL.Text,
+    'confirmed_txids' : IDL.Vec(IDL.Text),
+    'block_timestamp' : IDL.Nat64,
+    'block_height' : IDL.Nat32,
+  });
+  const Result_4 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const AddLiquidityInfo = IDL.Record({
+    'btc_amount_for_add_liquidity' : IDL.Nat64,
+    'rune_amount_for_add_liquidity' : IDL.Nat,
+  });
+  const RollbackTxArgs = IDL.Record({ 'txid' : IDL.Text });
   return IDL.Service({
     'claim' : IDL.Func([], [Result], []),
-    'deposit' : IDL.Func([Utxo, Utxo], [Result_1], []),
-    'execute_tx' : IDL.Func([ExecuteTxArgs], [Result_2], []),
-    'finalize_tx' : IDL.Func([FinalizeTxArgs], [Result_3], []),
+    'end_game' : IDL.Func([], [], []),
+    'etch_rune' : IDL.Func([], [Result_1], []),
+    'execute_tx' : IDL.Func([ExecuteTxArgs], [Result_1], []),
+    'get_chain_key_btc_address' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
+    'get_exchange_state' : IDL.Func([], [ExchangeState], ['query']),
     'get_game_and_gamer_infos' : IDL.Func(
         [IDL.Text],
         [GameAndGamer],
@@ -159,29 +206,28 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(PoolInfo)],
         ['query'],
       ),
-    'get_pool_list' : IDL.Func(
-        [GetPoolListArgs],
-        [IDL.Vec(PoolInfo)],
-        ['query'],
-      ),
+    'get_pool_list' : IDL.Func([], [IDL.Vec(PoolBasic)], ['query']),
     'get_pool_states' : IDL.Func([], [IDL.Vec(PoolState)], ['query']),
     'get_register_info' : IDL.Func([], [RegisterInfo], ['query']),
-    'get_rune_deposit_address' : IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
-    'init_key' : IDL.Func([], [Result_4], []),
-    'rollback_tx' : IDL.Func([FinalizeTxArgs], [Result_3], []),
+    'init_btc_utxo' : IDL.Func([Utxo], [Result_2], []),
+    'init_key' : IDL.Func([], [Result_3], []),
+    'new_block' : IDL.Func([NewBlockInfo], [Result_4], []),
+    'query_add_liquidity_info' : IDL.Func([], [AddLiquidityInfo], ['query']),
+    'query_principle_by_ii' : IDL.Func([IDL.Text], [IDL.Text], []),
+    'reset_blocks' : IDL.Func([], [], []),
+    'rollback_tx' : IDL.Func([RollbackTxArgs], [Result_4], []),
+    'update_rune_info' : IDL.Func([Utxo], [], []),
   });
 };
 export const init = ({ IDL }) => {
   return [
-    IDL.Nat64,
-    IDL.Nat32,
     IDL.Text,
     IDL.Nat64,
     IDL.Nat64,
-    IDL.Nat64,
-    IDL.Nat,
     IDL.Nat,
     IDL.Principal,
     IDL.Principal,
+    IDL.Principal,
+    IDL.Text,
   ];
 };

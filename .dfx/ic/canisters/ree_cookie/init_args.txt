@@ -1,1 +1,1 @@
-(nat64, nat32, text, nat64, nat64, nat64, nat, nat, principal, principal)
+(text, nat64, nat64, nat, principal, principal, principal, text)

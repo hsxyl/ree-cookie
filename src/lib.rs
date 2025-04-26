@@ -7,6 +7,7 @@ pub mod state;
 pub mod utils;
 pub mod log;
 pub mod psbt;
+pub mod reorg;
 
 pub use candid::{Principal, CandidType};
 pub use errors::*;

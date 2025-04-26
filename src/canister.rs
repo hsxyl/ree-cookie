@@ -1,147 +1,207 @@
-
 use std::str::FromStr;
 
+pub use crate::log::*;
 use crate::{
-    external::{internal_identity::get_principal, management::request_schnorr_key}, game::{game::{Game, GameAndGamer}, gamer::Gamer}, memory::{mutate_state, read_state, set_state}, state::{ExchangeState, PoolState}, utils::{tweak_pubkey_with_empty, RegisterInfo}, ExchangeError, Seconds, MIN_BTC_VALUE
+    external::{
+        bitcoin_customs::{etching_v3, EtchingArgs},
+        internal_identity::get_principal,
+        management::request_schnorr_key,
+    },
+    game::
+        game::GameAndGamer
+    ,
+    memory::{
+        mutate_state, read_state, set_state, ADDRESS_PRINCIPLE_MAP, BLOCKS, GAMER, TX_RECORDS,
+    },
+    state::{ExchangeState, PoolState},
+    utils::{calculate_premine_rune_amount, tweak_pubkey_with_empty, AddLiquidityInfo, RegisterInfo},
+    ExchangeError, Seconds, MIN_BTC_VALUE,
 };
 use candid::Principal;
+pub use ic_canister_log::log;
 use ic_cdk::{api::management_canister::bitcoin::Satoshi, init, post_upgrade, query, update};
 use ree_types::{
-    bitcoin::{Address, Network, Psbt }, exchange_interfaces::{
-        ExecuteTxArgs, ExecuteTxResponse, FinalizeTxArgs, FinalizeTxResponse,
-        GetMinimalTxValueArgs, GetMinimalTxValueResponse, GetPoolInfoArgs, GetPoolInfoResponse,
-        GetPoolListArgs, GetPoolListResponse, PoolInfo, RollbackTxArgs, RollbackTxResponse,
-    }, CoinBalance, CoinId, Intention, Pubkey, Utxo
+    bitcoin::{Address, Network, Psbt},
+    exchange_interfaces::{
+        ExecuteTxArgs, ExecuteTxResponse, GetMinimalTxValueArgs, GetMinimalTxValueResponse,
+        GetPoolInfoArgs, GetPoolInfoResponse, GetPoolListResponse, NewBlockArgs, NewBlockResponse,
+        PoolBasic, PoolInfo, RollbackTxArgs, RollbackTxResponse,
+    },
+    CoinBalance, Intention, Pubkey, Utxo,
 };
-pub use ic_canister_log::log;
-pub use crate::log::*;
 
 #[init]
 fn init(
-    rune_id_block: u64,
-    rune_id_tx: u32,
-    symbol: String,
-    game_duration: Seconds,
+    rune_name: String,
     gamer_register_fee: Satoshi,
     claim_cooling_down: Seconds,
-    claimed_cookies_per_click: u128,
-    max_cookies: u128,
+    cookie_amount_per_claim: u128,
     orchestrator: Principal,
     ii_canister: Principal,
+    btc_customs_principle: Principal,
+    richswap_pool_address: String
 ) {
-    let rune_id = CoinId {
-        block: rune_id_block, 
-        tx: rune_id_tx
-    };
-    assert_ne!(rune_id, CoinId::btc(), "Can't use btc init");
     set_state(ExchangeState::init(
-        rune_id,
-        symbol,
-        game_duration,
+        rune_name,
         gamer_register_fee,
         claim_cooling_down,
-        claimed_cookies_per_click,
-        max_cookies,
+        cookie_amount_per_claim,
         orchestrator,
-        ii_canister
+        ii_canister,
+        btc_customs_principle,
+        richswap_pool_address
     ));
 }
 
 #[update]
 pub async fn init_key() -> Result<String, ExchangeError> {
-    let (current_address, rune_id) = read_state(|s| (s.address.clone(), s.rune_id.clone()));
+    let (current_address, rune_name) = read_state(|s| (s.address.clone(), s.rune_name.clone()));
     if let Some(address) = current_address {
         return Ok(address);
     } else {
-        let untweaked_pubkey = request_schnorr_key("key_1", rune_id.to_bytes()).await?;
+        let untweaked_pubkey = request_schnorr_key("key_1", rune_name.into_bytes()).await?;
         let tweaked_pubkey = tweak_pubkey_with_empty(untweaked_pubkey.clone());
-        // cfg_if::cfg_if! {
-            // if #[cfg(feature = "testnet")] {
-                let address = Address::p2tr_tweaked(tweaked_pubkey, Network::Testnet4);
-            // } else {
-                // let address = Address::p2tr_tweaked(tweaked_pubkey, Network::Bitcoin);
-            // }
-        // }
-        mutate_state(|s| {
-            s.key = Some(untweaked_pubkey.clone());
-            s.address = Some(address.to_string());
+        cfg_if::cfg_if! {
+        if #[cfg(feature = "testnet")] {
+            let address = Address::p2tr_tweaked(tweaked_pubkey, Network::Testnet4);
+        } else {
+            let address = Address::p2tr_tweaked(tweaked_pubkey, Network::Bitcoin);
+        }
+        }
+        mutate_state(|es| {
+            es.key = Some(untweaked_pubkey.clone());
+            es.address = Some(address.to_string());
+            es.game_status = es.game_status.finish_init_key();
         });
         Ok(address.to_string())
     }
 }
 
-#[query]
-fn get_rune_deposit_address() -> Option<String> {
-    read_state(|s| s.address.clone())
-}
-
-#[query]
-fn get_register_info() -> RegisterInfo {
-    let (key, address, register_fee, last_state_res) = read_state(|s| (s.key.clone(), s.address.clone(), s.game.gamer_register_fee,s.last_state()));
-    let last_state = last_state_res.unwrap();
-    let tweaked_key = tweak_pubkey_with_empty(key.clone().unwrap());
-    // tweaked_key.to
-    RegisterInfo { 
-        untweaked_key: key.unwrap(),
-        address: address.unwrap(), 
-        utxo: last_state.utxo.clone(), 
-        register_fee,
-        tweaked_key: Pubkey::from_str(&tweaked_key.to_string()).unwrap(),
-        nonce: last_state.nonce
-    }
-
-}
-
 #[update]
-pub async fn deposit(utxo_for_rune: Utxo, utxo_for_btc: Utxo) -> Result<(), ExchangeError> {
-    let rune_balance = utxo_for_rune
-        .maybe_rune
-        .clone()
-        .ok_or(ExchangeError::CustomError(
-            "rune info not found".to_string(),
-        ))?;
-    assert_ne!(rune_balance.id, CoinId::btc(), "Can't use btc init");
-
+pub async fn init_btc_utxo(utxo_for_btc: Utxo) -> Result<(), ExchangeError> {
     mutate_state(|es| {
-        if es.game.max_cookies != rune_balance.value {
-            return Err(ExchangeError::DepositRuneBalanceIncorrect(
-                es.game.max_cookies.to_string(),
-                rune_balance.value.to_string(),
-            ));
-        }
-
-        es.game.game_start_time = ic_cdk::api::time();
-        let rune_amount = rune_balance.value;
         es.states.push(PoolState {
             id: None,
             nonce: 0,
             utxo: utxo_for_btc,
-            rune_utxo: utxo_for_rune,
-            rune_balance: rune_amount,
+            rune_utxo: None,
+            rune_balance: 0,
             user_action: crate::state::UserAction::Init,
         });
-        Ok(())
-    })?;
+
+        es.game_status = es.game_status.finish_init_btc();
+    });
 
     Ok(())
 }
 
-#[update]
-pub fn claim()->Result<u128, ExchangeError>{
+#[query]
+fn get_exchange_state() -> ExchangeState {
+    read_state(|s| s.clone())
+}
 
+#[query]
+fn get_chain_key_btc_address() -> Option<String> {
+    read_state(|es| es.address.clone())
+}
+
+#[query]
+fn get_register_info() -> RegisterInfo {
+    let (key, address, register_fee, last_state_res) = read_state(|s| {
+        (
+            s.key.clone(),
+            s.address.clone(),
+            s.game.gamer_register_fee,
+            s.last_state(),
+        )
+    });
+    let last_state = last_state_res.unwrap();
+    let tweaked_key = tweak_pubkey_with_empty(key.clone().unwrap());
+    RegisterInfo {
+        untweaked_key: key.unwrap(),
+        address: address.unwrap(),
+        utxo: last_state.utxo.clone(),
+        register_fee,
+        tweaked_key: Pubkey::from_str(&tweaked_key.to_string()).unwrap(),
+        nonce: last_state.nonce,
+    }
+}
+
+#[update]
+pub fn claim() -> Result<u128, ExchangeError> {
     let principal = ic_cdk::caller();
 
-    let address = read_state(
-        |s| s.address_principal_map.get(&principal).ok_or(
-            ExchangeError::GamerNotFound(principal.to_text().clone())
-        )
-    )?;
+    let address = crate::memory::ADDRESS_PRINCIPLE_MAP.with_borrow(|m| {
+        m.get(&principal)
+            .ok_or(ExchangeError::GamerNotFound(principal.to_text().clone()))
+    })?;
 
-    mutate_state(
-        |s| {
-            s.game.claim(address)
+    mutate_state(|s| s.game.claim(address))
+}
+
+// need permission check
+#[update]
+async fn end_game()  {
+    mutate_state(|s| {
+        s.game.is_end = true;
+        s.game_status = s.game_status.end();
+    });
+}
+
+#[update]
+async fn etch_rune()-> std::result::Result<String, String>{
+    let (etching_args, address) = read_state(|s| {
+        (
+            EtchingArgs {
+                rune_name: s.rune_name.clone(),
+                divisibility: Some(8),
+                premine: Some(calculate_premine_rune_amount()),
+                logo: None,
+                symbol: None,
+                terms: None,
+                turbo: false,
+            },
+            s.address.clone().unwrap(),
+        )
+    });
+
+    let etch_key = etching_v3(etching_args, address)
+        .await
+        .map_err(|e| format!("etching_v3 failed: {:?}", e))?
+        .0?;
+    mutate_state(|s| {
+        s.etching_key = Some(etch_key.clone());
+    });
+
+    Ok(etch_key)
+}
+
+#[update]
+async fn update_rune_info(premine_rune_utxo: Utxo) {
+    mutate_state(|s| {
+        let rune_balance = premine_rune_utxo.maybe_rune.expect("rune not found");
+        s.rune_id = Some(rune_balance.id);
+        let mut last_state = s.states.pop().expect(
+            "No state found in the pool. Please check the pool status.",
+        );
+        last_state.rune_balance =  rune_balance.value;
+        assert_eq!(
+            last_state.rune_balance,
+            calculate_premine_rune_amount()
+        );
+        s.states.push(last_state);
+        s.game_status = s.game_status.rune_minted();
+    });
+}
+
+#[query]
+pub fn query_add_liquidity_info()-> AddLiquidityInfo{
+    read_state(|s| {
+        AddLiquidityInfo { 
+            btc_amount_for_add_liquidity: s.game.gamer_register_fee * GAMER.with_borrow(|g| g.len() as u64), 
+            rune_amount_for_add_liquidity: calculate_premine_rune_amount() - s.game.claimed_cookies 
         }
-    )
+    })
 }
 
 /// REE API
@@ -152,10 +212,8 @@ fn get_minimal_tx_value(_args: GetMinimalTxValueArgs) -> GetMinimalTxValueRespon
 }
 
 #[query]
-pub fn get_pool_states()->Vec<PoolState> {
-    read_state(|s| {
-        s.states.clone()
-    })
+pub fn get_pool_states() -> Vec<PoolState> {
+    read_state(|s| s.states.clone())
 }
 
 #[query]
@@ -167,16 +225,26 @@ pub fn get_pool_info(args: GetPoolInfoArgs) -> GetPoolInfoResponse {
             .eq(&es.address.clone().unwrap())
             .then_some(PoolInfo {
                 key: es.key.clone().unwrap(),
-                key_derivation_path: vec![es.rune_id.clone().to_bytes()],
-                name: es.symbol.clone(),
+                key_derivation_path: vec![es.rune_name.clone().into_bytes()],
+                name: es.rune_name.clone(),
                 address: es.address.clone().unwrap(),
                 nonce: last_state.nonce,
-                coin_reserved: vec![CoinBalance {
-                    id: es.rune_id.clone(),
-                    value: last_state.rune_balance,
-                }],
+                coin_reserved: es
+                    .rune_id
+                    .map(|rune_id| {
+                        vec![CoinBalance {
+                            id: rune_id,
+                            value: last_state.rune_balance,
+                        }]
+                    })
+                    .unwrap_or(vec![]),
                 btc_reserved: last_state.btc_balance(),
-                utxos: vec![last_state.utxo.clone(), last_state.rune_utxo.clone()],
+                utxos: last_state
+                    .rune_utxo
+                    .clone()
+                    .map(|rune_utxo| vec![rune_utxo, last_state.utxo.clone()])
+                    .unwrap_or(vec![last_state.utxo.clone()]),
+
                 attributes: "".to_string(),
             }),
         Err(_) => {
@@ -187,33 +255,23 @@ pub fn get_pool_info(args: GetPoolInfoArgs) -> GetPoolInfoResponse {
 
 #[query]
 pub fn get_game_and_gamer_infos(gamer_id: crate::Address) -> GameAndGamer {
-
-    read_state(|s| {
-        GameAndGamer { 
-            game_duration: s.game.game_duration, 
-            game_start_time: s.game.game_start_time, 
-            gamer_register_fee: s.game.gamer_register_fee, 
-            claim_cooling_down: s.game.claim_cooling_down, 
-            cookie_amount_per_claim: s.game.cookie_amount_per_claim, 
-            max_cookies: s.game.max_cookies, 
-            claimed_cookies: s.game.claimed_cookies, 
-            gamer: s.game.gamer.get(&gamer_id) 
-        }
-    }) 
+    read_state(|s| GameAndGamer {
+        is_end: s.game.is_end,
+        gamer_register_fee: s.game.gamer_register_fee,
+        claim_cooling_down: s.game.claim_cooling_down,
+        cookie_amount_per_claim: s.game.cookie_amount_per_claim,
+        claimed_cookies: s.game.claimed_cookies,
+        gamer: GAMER.with_borrow(|g| g.get(&gamer_id)),
+    })
 }
 
 #[query]
-pub fn get_pool_list(args: GetPoolListArgs) -> GetPoolListResponse {
-    let (key, address) = read_state(|s| (s.key.clone().unwrap(), s.address.clone().unwrap()));
-    if args.limit == 0 && args.from.is_some_and(|e| e.ne(&key)) {
-        return vec![];
-    } else {
-        get_pool_info(GetPoolInfoArgs {
-            pool_address: address,
-        })
-        .map(|e| vec![e])
-        .unwrap_or(vec![])
-    }
+pub fn get_pool_list() -> GetPoolListResponse {
+    let (name, address) = read_state(|s| (s.rune_name.clone(), s.address.clone().unwrap()));
+    vec![PoolBasic {
+        name: name,
+        address,
+    }]
 }
 
 #[update(guard = "ensure_orchestrator")]
@@ -268,79 +326,229 @@ pub async fn execute_tx(args: ExecuteTxArgs) -> ExecuteTxResponse {
                 )
             })
             .map_err(|e| e.to_string())?;
-            let rune_id = read_state(|s| s.rune_id.clone());
-            crate::psbt::sign(&mut psbt, &consumed, rune_id.to_bytes())
+            let rune_name = read_state(|s| s.rune_name.clone());
+            crate::psbt::sign(&mut psbt, &consumed, rune_name.into_bytes())
                 .await
                 .map_err(|e| e.to_string())?;
 
-            let principal_from_ii = get_principal(initiator.clone()).await.map_err(
-                |e| format!("get_principal failed: {:?}", e)
-            )?.0;
+            let principal_byte_buf = get_principal(initiator.clone())
+                .await
+                .map_err(|e| format!("get_principal failed: {:?}, initiator: {:?}", e, initiator))?
+                .0?;
+
+            let principal_of_initiator = Principal::from_slice(&principal_byte_buf);
 
             mutate_state(|s| {
                 s.game.register_new_gamer(initiator.clone());
                 s.commit(new_state);
-                s.address_principal_map.insert(principal_from_ii, initiator.clone());
             });
 
-        
+            ADDRESS_PRINCIPLE_MAP.with_borrow_mut(|m| {
+                m.insert(principal_of_initiator, initiator.clone());
+            });
         }
-        // "withdraw" => {
-        //     let (new_state, consumed) = read_state(|es| {
-        //         es.validate_withdraw(
-        //             txid.clone(),
-        //             nonce,
-        //             pool_utxo_spend,
-        //             pool_utxo_receive,
-        //             input_coins,
-        //             output_coins,
-        //             initiator.clone(),
-        //         )
-        //     })
-        //     .map_err(|e| e.to_string())?;
-        //     let rune_id = read_state(|s| s.rune_id.clone());
-        //     crate::psbt::sign(&mut psbt, &consumed, rune_id.to_bytes())
-        //         .await
-        //         .map_err(|e| e.to_string())?;
-        //     mutate_state(|s| {
-        //         s.commit(new_state);
-        //         s.game.withdraw(initiator.clone())
-        //     })
-        //     .map_err(|e| e.to_string())?;
-        // }
+        "add_liquidity" => {
+            let (new_state, consumed) = read_state(|es| {
+                es.validate_add_liquidity(
+                    txid.clone(),
+                    nonce,
+                    pool_utxo_spend,
+                    pool_utxo_receive,
+                    input_coins,
+                    output_coins,
+                    initiator.clone(),
+                )
+            })
+            .map_err(|e| e.to_string())?;
+            let rune_name = read_state(|s| s.rune_name.clone());
+            crate::psbt::sign(&mut psbt, &consumed, rune_name.into_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            mutate_state(|s| {
+                s.game.add_liquidity();
+                s.game_status.add_liquidity();
+                s.commit(new_state);
+            });
+        }
+        "withdraw" => {
+            let (new_state, consumed) = read_state(|es| {
+                es.validate_withdraw(
+                    txid.clone(),
+                    nonce,
+                    pool_utxo_spend,
+                    pool_utxo_receive,
+                    input_coins,
+                    output_coins,
+                    initiator.clone(),
+                )
+            })
+            .map_err(|e| e.to_string())?;
+            let rune_name = read_state(|s| s.rune_name.clone());
+            crate::psbt::sign(&mut psbt, &consumed, rune_name.into_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            mutate_state(|s| {
+                s.commit(new_state);
+                s.game.withdraw(initiator.clone())
+            })
+            .map_err(|e| e.to_string())?;
+        }
         _ => {
             return Err("invalid method".to_string());
         }
     }
+
+    // Record the transaction as unconfirmed and track which pools it affects
+    TX_RECORDS.with_borrow_mut(|m| {
+        ic_cdk::println!("new unconfirmed txid: {} in pool: {} ", txid, pool_address);
+        let mut record = m.get(&(txid.clone(), false)).unwrap_or_default();
+        if !record.pools.contains(&pool_address) {
+            record.pools.push(pool_address.clone());
+        }
+        m.insert((txid.clone(), false), record);
+    });
 
     Ok(psbt.serialize_hex())
 }
 
 /// REE API
 #[update(guard = "ensure_orchestrator")]
-pub fn finalize_tx(args: FinalizeTxArgs) -> FinalizeTxResponse {
-    read_state(|s| 
-        s.key.clone().ok_or("key not init".to_string())?
-        .eq(&args.pool_key)
-        .then(|| ())
-        .ok_or("key not match".to_string())
-    )?;
+pub fn new_block(args: NewBlockArgs) -> NewBlockResponse {
+    match crate::reorg::detect_reorg(Network::Testnet4, args.clone()) {
+        Ok(_) => {}
+        Err(crate::reorg::ReorgError::DuplicateBlock { height, hash }) => {
+            ic_cdk::println!(
+                "Duplicate block detected at height {} with hash {}",
+                height,
+                hash
+            );
+        }
+        Err(crate::reorg::ReorgError::Unrecoverable) => {
+            return Err("Unrecoverable reorg detected".to_string());
+        }
+        Err(crate::reorg::ReorgError::BlockNotFoundInState { height }) => {
+            return Err(format!("Block not found in state at height {}", height));
+        }
+        Err(crate::reorg::ReorgError::Recoverable { height, depth }) => {
+            crate::reorg::handle_reorg(height, depth);
+        }
+    }
 
-    mutate_state(|es| es.finalize(args.txid)).map_err(|e| e.to_string())
+    let NewBlockArgs {
+        block_height,
+        block_hash: _,
+        block_timestamp: _,
+        confirmed_txids,
+    } = args.clone();
+
+    // Store the new block information
+    BLOCKS.with_borrow_mut(|m| {
+        m.insert(block_height, args);
+        ic_cdk::println!("new block {} inserted into blocks", block_height,);
+    });
+
+    // Mark transactions as confirmed
+    for txid in confirmed_txids {
+        TX_RECORDS.with_borrow_mut(|m| {
+            if let Some(record) = m.get(&(txid.clone(), false)) {
+                m.insert((txid.clone(), true), record.clone());
+                ic_cdk::println!("confirm txid: {} with pools: {:?}", txid, record.pools);
+            }
+        });
+    }
+    // Calculate the height below which blocks are considered fully confirmed (beyond reorg risk)
+    let confirmed_height =
+        block_height - crate::reorg::get_max_recoverable_reorg_depth(Network::Testnet4) + 1;
+
+    let exchange_pool_address =
+        read_state(|s| s.address.clone()).ok_or("pool address not init".to_string())?;
+    // Finalize transactions in confirmed blocks
+    BLOCKS.with_borrow(|m| {
+        m.iter()
+            .take_while(|(height, _)| *height <= confirmed_height)
+            .for_each(|(height, block_info)| {
+                ic_cdk::println!("finalizing txs in block: {}", height);
+                block_info.confirmed_txids.into_iter().for_each(|txid| {
+                    TX_RECORDS.with_borrow_mut(|m| {
+                        if let Some(record) = m.get(&(txid.clone(), true)) {
+                            record.pools.iter().for_each(|pool| {
+                                if pool.eq(&exchange_pool_address) {
+                                    mutate_state(|s| {
+                                        s.finalize(txid.clone()).map_err(|e| e.to_string())
+                                    })
+                                    .unwrap();
+                                }
+                            });
+                        }
+                    })
+                })
+            })
+    });
+
+    // Clean up old block data that's no longer needed
+    BLOCKS.with_borrow_mut(|m| {
+        let heights_to_remove: Vec<u32> = m
+            .iter()
+            .take_while(|(height, _)| *height <= confirmed_height)
+            .map(|(height, _)| height)
+            .collect();
+        for height in heights_to_remove {
+            ic_cdk::println!("removing block: {}", height);
+            m.remove(&height);
+        }
+    });
+
+    Ok(())
 }
 
 /// REE API
 #[update(guard = "ensure_orchestrator")]
 pub fn rollback_tx(args: RollbackTxArgs) -> RollbackTxResponse {
-    read_state(|s| 
-        s.key.clone().ok_or("key not init".to_string())?
-        .eq(&args.pool_key)
-        .then(|| ())
-        .ok_or("key not match".to_string())
-    )?;
+    // read_state(|s|
+    //     s.key.clone().ok_or("key not init".to_string())?
+    //     .eq(&args.pool_key)
+    //     .then(|| ())
+    //     .ok_or("key not match".to_string())
+    // )?;
 
-    mutate_state(|es| es.rollback(args.txid)).map_err(|e| e.to_string())
-    
+    // mutate_state(|es| es.rollback(args.txid)).map_err(|e| e.to_string())
+
+    let cookie_pool =
+        read_state(|s| s.address.clone()).ok_or("pool address not init".to_string())?;
+
+    TX_RECORDS.with_borrow(|m| {
+        let maybe_unconfirmed_record = m.get(&(args.txid.clone(), false));
+        let maybe_confirmed_record = m.get(&(args.txid.clone(), true));
+        let record = maybe_confirmed_record.or(maybe_unconfirmed_record).unwrap();
+        ic_cdk::println!(
+            "rollback txid: {} with pools: {:?}",
+            args.txid,
+            record.pools
+        );
+
+        // Roll back each affected pool to its state before this transaction
+        record.pools.iter().for_each(|pool_address| {
+            if pool_address.eq(&cookie_pool) {
+                // Rollback the state of the pool
+                mutate_state(|s| s.rollback(args.txid)).unwrap();
+            }
+        });
+    });
+
+    Ok(())
+}
+
+#[update(guard = "is_controller")]
+pub fn reset_blocks() {
+    BLOCKS.with_borrow_mut(|b| {
+        b.clear_new();
+    });
+} 
+
+fn is_controller() -> std::result::Result<(), String> {
+    ic_cdk::api::is_controller(&ic_cdk::caller())
+    .then(|| ())
+    .ok_or("Access denied".to_string())
 }
 
 fn ensure_orchestrator() -> std::result::Result<(), String> {
@@ -354,21 +562,16 @@ fn ensure_orchestrator() -> std::result::Result<(), String> {
 
 #[post_upgrade]
 fn post_upgrade() {
-
-    // mutate_state(|s| {
-    //     s.game.game_start_time = 1742412833;
-    //     s.game.game_duration = 60 * 60 * 24 * 50;
-    //     s.game.claim_cooling_down = 60 * 60 * 1;
-    // });
-   
     log!(
         INFO,
         "Finish Upgrade current version: {}",
         env!("CARGO_PKG_VERSION")
     );
-}
 
+    mutate_state(|s| {
+        s.rune_name = "BITCOIN•TESTNET•COOKIE".to_string();
+    });
+}
 
 // Enable Candid export
 ic_cdk::export_candid!();
-

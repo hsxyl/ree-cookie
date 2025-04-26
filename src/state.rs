@@ -1,39 +1,103 @@
 use ic_cdk::api::management_canister::bitcoin::Satoshi;
 use ic_stable_structures::storable::Bound;
-use ic_stable_structures::{StableBTreeMap, Storable};
+use ic_stable_structures::Storable;
 use ree_types::{CoinBalance, CoinId, InputCoin, OutputCoin};
 use std::borrow::Cow;
 
 use crate::game::game::Game;
-use crate::memory::{mutate_state, Memory};
+use crate::memory::{read_state, GAMER};
+use crate::utils::calculate_premine_rune_amount;
 use crate::*;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone, CandidType)]
 pub struct ExchangeState {
-    pub rune_id: CoinId,
-    pub symbol: String,
+    pub rune_name: String,
+    pub rune_id: Option<CoinId>,
+    // pub symbol: String,
     pub key: Option<Pubkey>,
     pub address: Option<String>,
     pub game: Game,
     pub orchestrator: Principal,
     pub states: Vec<PoolState>,
     pub ii_canister: Principal,
-    #[serde(skip, default = "crate::memory::init_address_principal_map")]
-    pub address_principal_map: StableBTreeMap<Principal, Address, Memory>,
+    pub btc_customs_principle: Principal,
+    pub etching_key: Option<String>,
+    pub richswap_pool_address: String,
+    pub game_status: GameStatus,
 }
 
-impl Clone for ExchangeState {
-    fn clone(&self) -> Self {
-        Self {
-            rune_id: self.rune_id.clone(),
-            symbol: self.symbol.clone(),
-            key: self.key.clone(),
-            address: self.address.clone(),
-            game: self.game.clone(),
-            orchestrator: self.orchestrator.clone(),
-            states: self.states.clone(),
-            ii_canister: self.ii_canister.clone(),
-            address_principal_map: crate::memory::init_address_principal_map(),
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
+pub enum GameStatus {
+    Initialize { init_key: bool, init_btc: bool },
+    Play,
+    Ended,
+    RunesMinted,
+    LiquidityAdded,
+    Withdrawable,
+}
+
+impl GameStatus {
+    pub fn finish_init_key(&self) -> GameStatus {
+        match self {
+            GameStatus::Initialize {
+                init_key: _,
+                init_btc,
+            } => {
+                if *init_btc {
+                    return GameStatus::Play;
+                }
+                GameStatus::Initialize {
+                    init_key: true,
+                    init_btc: false,
+                }
+            }
+            _ => panic!("GameStatus should be Initialize"),
+        }
+    }
+
+    pub fn finish_init_btc(&self) -> GameStatus {
+        match self {
+            GameStatus::Initialize {
+                init_key,
+                init_btc: _,
+            } => {
+                if *init_key {
+                    return GameStatus::Play;
+                }
+                GameStatus::Initialize {
+                    init_key: false,
+                    init_btc: true,
+                }
+            }
+            _ => panic!("GameStatus should be Initialize"),
+        }
+    }
+
+    pub fn end(&self) -> GameStatus {
+        match self {
+            GameStatus::Play => GameStatus::Ended,
+            _ => panic!("GameStatus should be InProgress"),
+        }
+    }
+
+    pub fn rune_minted(&self) -> GameStatus {
+        match self {
+            GameStatus::Ended => GameStatus::RunesMinted,
+            _ => panic!("GameStatus should be Ended"),
+        }
+    }
+
+    pub fn add_liquidity(&self) -> GameStatus {
+        match self {
+            GameStatus::RunesMinted => GameStatus::LiquidityAdded,
+            _ => panic!("GameStatus should be RunesMinted"),
+        }
+    }
+
+    pub fn withdrawable(&self) -> GameStatus {
+        match self {
+            GameStatus::Ended => GameStatus::Withdrawable,
+            _ => panic!("GameStatus should be InProgress"),
         }
     }
 }
@@ -52,32 +116,36 @@ impl Storable for ExchangeState {
 
 impl ExchangeState {
     pub fn init(
-        rune_id: CoinId,
-        symbol: String,
-        game_duration: Seconds,
+        rune_name: String,
         gamer_register_fee: Satoshi,
         claim_cooling_down: Seconds,
-        claimed_cookies_per_click: u128,
-        max_cookies: u128,
+        cookie_amount_per_claim: u128,
         orchestrator: Principal,
         ii_canister: Principal,
+        btc_customs_principle: Principal,
+        richswap_pool_address: String,
     ) -> Self {
         Self {
-            rune_id,
-            symbol,
+            rune_id: Option::None,
+            // symbol,
+            rune_name,
             key: None,
             address: None,
             game: Game::init(
-                game_duration,
                 gamer_register_fee,
                 claim_cooling_down,
-                claimed_cookies_per_click,
-                max_cookies,
+                cookie_amount_per_claim,
             ),
             orchestrator,
             states: vec![],
             ii_canister,
-            address_principal_map: crate::memory::init_address_principal_map()
+            btc_customs_principle,
+            etching_key: None,
+            richswap_pool_address,
+            game_status: GameStatus::Initialize {
+                init_key: false,
+                init_btc: false,
+            },
         }
     }
 
@@ -90,6 +158,119 @@ impl ExchangeState {
             .inspect_err(|e| log!(ERROR, "{}", e))
     }
 
+    pub fn validate_withdraw(
+        &self,
+        _txid: Txid,
+        nonce: u64,
+        _pool_utxo_spend: Vec<String>,
+        _pool_utxo_receive: Vec<String>,
+        input_coins: Vec<InputCoin>,
+        output_coins: Vec<OutputCoin>,
+        initiator_address: Address,
+    ) -> Result<(PoolState, Utxo)> {
+        assert!(
+            matches!(self.game_status, GameStatus::Withdrawable),
+            "GameStatus should be Withdrawable, but got: {:?}",
+            self.game_status
+        );
+
+        let gamer = GAMER
+            .with_borrow(|g| g.get(&initiator_address))
+            .ok_or(ExchangeError::GamerNotFound(initiator_address.clone()))?;
+        let pool_expected_spend_rune = CoinBalance {
+            id: self.rune_id.clone().ok_or(ExchangeError::InvalidRuneId)?,
+            value: gamer.cookies,
+        };
+        assert!(
+            output_coins.len() == 1
+                && input_coins.is_empty()
+                && output_coins[0].coin.id.eq(&pool_expected_spend_rune.id)
+                && output_coins[0].coin.value == pool_expected_spend_rune.value
+                && output_coins[0].to.eq(&initiator_address),
+        );
+
+        // the pool_utxo_spend should be equal to the utxo of the last state
+        let last_state = self.last_state()?;
+        // check nonce matches
+        (last_state.nonce == nonce)
+            .then(|| ())
+            .ok_or(ExchangeError::PoolStateExpired(last_state.nonce))?;
+
+        todo!()
+    }
+
+    pub fn validate_add_liquidity(
+        &self,
+        _txid: Txid,
+        nonce: u64,
+        pool_utxo_spend: Vec<String>,
+        _pool_utxo_receive: Vec<String>,
+        input_coins: Vec<InputCoin>,
+        output_coins: Vec<OutputCoin>,
+        _initiator_address: Address,
+    ) -> Result<(PoolState, Utxo)> {
+
+        assert!(
+            matches!(self.game_status, GameStatus::RunesMinted),
+            "GameStatus should be RunesMinted, but got: {:?}",
+            self.game_status
+        );
+
+        self.game.is_end()
+            .then(|| ())
+            .ok_or(ExchangeError::GameNotEnd)?;
+
+        // check input and output coin
+        let gamer_count = GAMER.with_borrow(|g| g.len());
+        let pool_expected_spend_btc = CoinBalance {
+            id: CoinId::btc(),
+            value: (gamer_count as u128) * (self.game.gamer_register_fee as u128),
+        };
+
+        let pool_expected_spend_rune = CoinBalance {
+            id: self.rune_id.clone().ok_or(ExchangeError::InvalidRuneId)?,
+            value: calculate_premine_rune_amount() - self.game.claimed_cookies,
+        };
+
+        let richswap_pool_address = read_state(|s| s.richswap_pool_address.clone());
+
+        assert!(
+            output_coins.len() == 2
+                && input_coins.is_empty()
+                && output_coins[0].coin.id.eq(&pool_expected_spend_btc.id)
+                && output_coins[0].coin.value == pool_expected_spend_btc.value
+                && output_coins[0].to.eq(&richswap_pool_address)
+                && output_coins[1].coin.id.eq(&pool_expected_spend_rune.id)
+                && output_coins[1].coin.value == pool_expected_spend_rune.value
+                && output_coins[1].to.eq(&richswap_pool_address),
+            "input_coins: {:?}, output_coins: {:?}",
+            input_coins,
+            output_coins
+        );
+
+        // the pool_utxo_spend should be equal to the utxo of the last state
+        let last_state = self.last_state()?;
+        // check nonce matches
+        (last_state.nonce == nonce)
+            .then(|| ())
+            .ok_or(ExchangeError::PoolStateExpired(last_state.nonce))?;
+        last_state
+            .utxo
+            .outpoint()
+            .eq(pool_utxo_spend
+                .last()
+                .ok_or(ExchangeError::InvalidSignPsbtArgs(
+                    "pool_utxo_spend is empty".to_string(),
+                ))?)
+            .then(|| ())
+            .ok_or(ExchangeError::InvalidSignPsbtArgs(format!(
+                "pool_utxo_spend: {:?}, last_state_utxo: {:?}",
+                pool_utxo_spend, last_state.utxo
+            )))?;
+
+        todo!()
+    }
+
     pub fn validate_register(
         &self,
         txid: Txid,
@@ -100,27 +281,20 @@ impl ExchangeState {
         output_coins: Vec<OutputCoin>,
         address: Address,
     ) -> Result<(PoolState, Utxo)> {
-        if self.game.gamer.contains_key(&address) {
+        if GAMER.with_borrow(|g| g.contains_key(&address)) {
             return Err(ExchangeError::GamerAlreadyExist(address.clone()));
         }
-
-        // check input and output coin
-        let pool_expected_receive_btc = CoinBalance {
-            id: CoinId::btc(),
-            value: self.game.gamer_register_fee as u128,
-        };
 
         // the input coins should be only one and the value should be equal to the register fee
         (input_coins.len() == 1
             && output_coins.is_empty()
             && input_coins[0].coin.id.eq(&CoinId::btc())
-            && input_coins[0].coin.value > self.game.gamer_register_fee as u128
-        )
-        .then(|| ())
-        .ok_or(ExchangeError::InvalidSignPsbtArgs(format!(
-            "input_coins: {:?}, output_coins: {:?}",
-            input_coins, output_coins
-        )))?;
+            && input_coins[0].coin.value == self.game.gamer_register_fee as u128)
+            .then(|| ())
+            .ok_or(ExchangeError::InvalidSignPsbtArgs(format!(
+                "input_coins: {:?}, output_coins: {:?}",
+                input_coins, output_coins
+            )))?;
 
         // the pool_utxo_spend should be equal to the utxo of the last state
         let last_state = self.last_state()?;
@@ -174,43 +348,6 @@ impl ExchangeState {
         Ok((new_state, last_state.utxo.clone()))
     }
 
-    // pub fn validate_withdraw(
-    //     &self,
-    //     _txid: Txid,
-    //     _nonce: u64,
-    //     _pool_utxo_spend: Vec<String>,
-    //     _pool_utxo_receive: Vec<String>,
-    //     input_coins: Vec<InputCoin>,
-    //     output_coins: Vec<OutputCoin>,
-    //     _address: Address,
-    // ) -> Result<(PoolState, Utxo)> {
-    //     // check input and output coin
-    //     (input_coins.len() == 0 && output_coins.len() == 2)
-    //         .then(|| ())
-    //         .ok_or(ExchangeError::InvalidSignPsbtArgs(format!(
-    //             "input_coins: {:?}, output_coins: {:?}",
-    //             input_coins, output_coins
-    //         )))?;
-
-    //     // let expect_transfer_to_
-
-    //     let output_btc = output_coins
-    //         .iter()
-    //         .find(|c| c.coin.id == CoinId::btc())
-    //         .ok_or(ExchangeError::InvalidSignPsbtArgs(
-    //             "output_btc not found".to_string(),
-    //         ))?;
-    //     let output_rune = output_coins
-    //         .iter()
-    //         .find(|c| c.coin.id == self.rune_id)
-    //         .ok_or(ExchangeError::InvalidSignPsbtArgs(
-    //             "output_rune not found".to_string(),
-    //         ))?;
-    //     // output_btc.to.eq()
-
-    //     todo!()
-    // }
-
     pub(crate) fn commit(&mut self, state: PoolState) {
         self.states.push(state);
     }
@@ -241,33 +378,35 @@ impl ExchangeState {
         if idx == 0 {
             // why impossible to rollback index 0 state?
             // In init case, the state is empty, so the first state pushed in deposit interface which needn't finalize or rollback
-            // In other case, the finalize will always keep the last finalized state in vec, so the rollback should be impossible to rollback index 0 state 
-            return Err(ExchangeError::InvalidState("Should not rollback index 0 state".to_string()));
+            // In other case, the finalize will always keep the last finalized state in vec, so the rollback should be impossible to rollback index 0 state
+            return Err(ExchangeError::InvalidState(
+                "Should not rollback index 0 state".to_string(),
+            ));
         }
 
         while self.states.len() > idx {
-            let state = self.states.pop().ok_or(
-                ExchangeError::InvalidState("Should not rollback index 0 state".to_string()),
-            )?;
+            let state = self.states.pop().ok_or(ExchangeError::InvalidState(
+                "Should not rollback index 0 state".to_string(),
+            ))?;
             match state.user_action {
                 UserAction::Init => {
                     // impossible to rollback init state
-                    return Err(ExchangeError::InvalidState("Should not rollback init action".to_string()));
-                },
+                    return Err(ExchangeError::InvalidState(
+                        "Should not rollback init action".to_string(),
+                    ));
+                }
                 UserAction::Register(address) => {
-                    mutate_state(|es| {
-                        es.game.gamer.remove(&address);
+                    GAMER.with_borrow_mut(|g| {
+                        g.remove(&address);
                     });
-                },
+                }
                 UserAction::Withdraw(address) => {
-                    mutate_state(|es| {
-                        let mut gamer = es.game.gamer.get(&address).ok_or(ExchangeError::GamerNotFound(address.clone()))?;
+                    GAMER.with_borrow_mut(|g| {
+                        let mut gamer = g.get(&address).expect("Gamer should exist in rollback");
                         gamer.is_withdrawn = false;
-                        es.game.gamer.insert(address, gamer.clone());
-
-                        Ok(())
-                    })?;
-                },
+                        g.insert(address.clone(), gamer.clone());
+                    });
+                }
             }
         }
 
@@ -280,7 +419,7 @@ pub struct PoolState {
     pub id: Option<Txid>,
     pub nonce: u64,
     pub utxo: Utxo,
-    pub rune_utxo: Utxo,
+    pub rune_utxo: Option<Utxo>,
     pub rune_balance: u128,
     pub user_action: UserAction,
 }
@@ -298,9 +437,7 @@ pub enum UserAction {
     Withdraw(Address),
 }
 
-thread_local! {
-  
-}
+thread_local! {}
 
 // pub fn mutate_state<F, R>(f: F) -> R
 // where
@@ -321,3 +458,15 @@ thread_local! {
 //         *s.borrow_mut() = Some(state);
 //     });
 // }
+
+#[test]
+pub fn test() {
+    let input = "225; 209; 222; 36; 248; 96; 118; 238; 2; 172; 201; 226; 207; 83; 78; 83; 28; 133; 229; 192; 29; 162; 40; 195; 199; 202; 155; 62; 2";
+    let numbers_vec: Vec<u8> = input
+        .split(';')
+        .map(|s| s.trim())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let p_blob = Principal::from_slice(&numbers_vec);
+    dbg!(&p_blob.to_text());
+}

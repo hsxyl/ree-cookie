@@ -1,7 +1,7 @@
-use ic_cdk::api::management_canister::bitcoin::Satoshi;
+use ic_cdk::api::management_canister::bitcoin::{BitcoinNetwork, Satoshi};
 use ree_types::bitcoin::key::{Secp256k1, TapTweak, TweakedPublicKey};
 
-use crate::*;
+use crate::{memory::read_state, *};
 
 pub(crate) fn tweak_pubkey_with_empty(untweaked: Pubkey) -> TweakedPublicKey {
     let secp = Secp256k1::new();
@@ -23,6 +23,12 @@ pub struct RegisterInfo {
     pub nonce: u64,
 }
 
+#[derive(CandidType, Serialize, Deserialize, Clone)]
+pub struct AddLiquidityInfo {
+    pub btc_amount_for_add_liquidity: Satoshi,
+    pub rune_amount_for_add_liquidity: u128,
+}
+
 #[test]
 pub fn test_tweak_pubkey() {
     let mock_raw_pubkey: Vec<u8> = vec![
@@ -38,3 +44,68 @@ pub fn test_tweak_pubkey() {
     dbg!(&addr);
 
 }
+
+pub fn get_max_recoverable_reorg_depth(network: BitcoinNetwork) -> u32 {
+    match network {
+        BitcoinNetwork::Regtest => 6,
+        BitcoinNetwork::Testnet => 64,
+        BitcoinNetwork::Mainnet => 6,
+    }
+}
+
+pub fn calculate_premine_rune_amount()->u128{
+    read_state(|s| {
+        s.game.claimed_cookies * 120 / 100
+    })
+}
+
+
+// pub(crate) fn detect_reorg(network: BitcoinNetwork, new_block: NewBlockInfo) -> Result<()> {
+//     ic_cdk::println!(
+//         "Processing new block - height: {}, hash: {}, timestamp: {}, confirmed_txs: {:?}",
+//         new_block.block_height,
+//         new_block.block_hash,
+//         new_block.block_timestamp,
+//         new_block.confirmed_txids
+//     );
+//     let current_block =
+//         BLOCKS.with_borrow(|m| m.iter().rev().next().map(|(_height, block)| block));
+//     match current_block {
+//         None => {
+//             ic_cdk::println!("No blocks found in exchange - this is expected for new exchanges");
+//             return Ok(());
+//         }
+//         Some(current_block) => {
+//             ic_cdk::println!(
+//                 "Current block - height: {:?}, hash: {:?}, timestamp: {:?}",
+//                 current_block.block_height,
+//                 current_block.block_hash,
+//                 current_block.block_timestamp
+//             );
+//             if new_block.block_height == current_block.block_height + 1 {
+//                 ic_cdk::println!("New block is the next block in the chain");
+//                 return Ok(());
+//             } else if new_block.block_height > current_block.block_height + 1 {
+//                 ic_cdk::println!("New block is more than one block ahead of the current block");
+//                 return Err(ExchangeError::Unrecoverable);
+//             } else {
+//                 let reorg_depth = current_block.block_height - new_block.block_height + 1;
+//                 ic_cdk::println!("Detected reorg - depth: {}", reorg_depth,);
+//                 if reorg_depth > get_max_recoverable_reorg_depth(network) {
+//                     ic_cdk::println!("Reorg depth is greater than the max recoverable reorg depth");
+//                     return Err(ExchangeError::Unrecoverable);
+//                 }
+//                 let target_block =
+//                     BLOCKS.with_borrow(|m| m.get(&new_block.block_height).unwrap());
+//                 if target_block.block_hash == new_block.block_hash {
+//                     ic_cdk::println!("New block is a duplicate block");
+//                     return Err(ExchangeError::DuplicateBlock(
+//                         new_block.block_height,
+//                         new_block.block_hash,
+//                     ));
+//                 }
+//                 return Err(ExchangeError::Recoverable(current_block.block_height, reorg_depth));
+//             }
+//         }
+//     }
+// }
